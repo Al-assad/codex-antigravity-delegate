@@ -72,24 +72,24 @@ class Logs(unittest.TestCase):
         self.assertEqual(cli.transcript_turn(self.file, cli.EMPTY, "missing")["reply"], "")
         checkpoint = cli.snapshot(self.file)
         self.file.write_text(self.file.read_text().replace("human", "other"))
-        with self.assertRaisesRegex(cli.Error, "基线"):
+        with self.assertRaisesRegex(cli.Error, "log baseline changed or was truncated"):
             cli.transcript_turn(self.file, checkpoint, "missing")
 
     def test_codex_incremental_hash_and_cross_offset_dedup(self):
-        event = {"type": "event_msg", "payload": {"type": "user_message", "message": "原消息"}}
+        event = {"type": "event_msg", "payload": {"type": "user_message", "message": "Original message: café"}}
         item = {"type": "response_item", "payload": {"type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": "原消息"}]}}
+                "content": [{"type": "input_text", "text": "Original message: café"}]}}
         append(self.file, event)
         original, checkpoint = cli.codex_context(self.file)
-        self.assertIn("原消息", original)
+        self.assertIn("Original message: café", original)
         append(self.file, item, {"type": "response_item", "payload": {"type": "function_call", "arguments": "do-not-send"}},
-               {"type": "event_msg", "payload": {"type": "agent_message", "message": "新消息"}})
+               {"type": "event_msg", "payload": {"type": "agent_message", "message": "New message: résumé"}})
         with self.file.open("a") as stream:
             stream.write('{"incomplete":')
         delta, new = cli.codex_context(self.file, checkpoint)
-        self.assertEqual(delta, "assistant: 新消息")
+        self.assertEqual(delta, "assistant: New message: résumé")
         self.assertEqual(new, {"line": 4, "sha256": cli.snapshot(self.file)["sha256"]})
-        self.file.write_text(self.file.read_text().replace("原消息", "改日志", 1))
+        self.file.write_text(self.file.read_text().replace("Original message: café", "Modified message: café", 1))
         with self.assertRaisesRegex(cli.Error, "reset-codex-offset"):
             cli.codex_context(self.file, checkpoint)
 
@@ -141,7 +141,7 @@ class Integration(unittest.TestCase):
         thread.start()
         cls.addClassCleanup(cls.server.server_close)
         cls.addClassCleanup(cls.server.shutdown)
-        cls.repo = cls.root / "repo 空格"
+        cls.repo = cls.root / "café repo"
         cls.work = cls.repo / "nested"
         cls.work.mkdir(parents=True)
         cls.projects = cls.root / "projects"
@@ -281,7 +281,7 @@ print(json.dumps({{"response": {{}}}}))
         self.start("--model", "provider-custom-full-id")
         self.assertEqual(self.last_initial()["model"], "provider-custom-full-id")
         error = self.run_cli("start", "--prompt", "test", "--model", "not-in-desktop", "--background", code=1)
-        self.assertIn("没有改用", error["error"])
+        self.assertIn("No other model was used", error["error"])
         self.assertEqual(sum(method == "CreateConversation" for method, _ in self.server.calls), 1)
 
     def test_project_fallback_never_uses_another_sidecar(self):
@@ -305,14 +305,14 @@ print(json.dumps({{"response": {{}}}}))
         target.write_text("modified\n")
         self.run_cli("review", "--cwd", str(repo), "--uncommitted", "--background")
         brief = self.last_initial()["prompt"][0]["text"]
-        self.assertIn("不得修改任何文件", brief)
+        self.assertIn("Read-only review: do not modify any files", brief)
         self.assertIn("M plan.md", brief)
         self.run_cli("review", "--cwd", str(repo), "--commit", revision, "--background")
-        self.assertIn("只评审提交 " + revision, self.last_initial()["prompt"][0]["text"])
-        self.run_cli("doc", "--cwd", str(repo), "--file", "plan.md", "--include-git", "--prompt", "润色", "--background")
+        self.assertIn("Review only commit " + revision, self.last_initial()["prompt"][0]["text"])
+        self.run_cli("doc", "--cwd", str(repo), "--file", "plan.md", "--include-git", "--prompt", "Polish the draft", "--background")
         brief = self.last_initial()["prompt"][0]["text"]
         self.assertIn(str(target), brief)
-        self.assertIn("不得改动其他文件", brief)
+        self.assertIn("Do not modify any other files", brief)
         self.assertIn("git diff --stat", brief)
 
     def test_followup_uncertain_does_not_advance_codex_offset(self):
@@ -369,7 +369,7 @@ print(json.dumps({{"response": {{}}}}))
         task = self.start()
         for state in ("RUN_STATE_RUNNING", "RUN_STATE_CANCELLING", "RUN_STATE_IDLE"):
             self.server.run_state = state
-            self.assertIn("等待超时", self.run_cli("wait", task["task_id"], "--timeout", "0.12", code=124)["error"])
+            self.assertIn("Wait timed out", self.run_cli("wait", task["task_id"], "--timeout", "0.12", code=124)["error"])
         self.assertEqual(self.run_cli("list")["tasks"][0]["phase"], "submitted")
         offline = self.root / "offline"
         try:
@@ -379,8 +379,8 @@ print(json.dumps({{"response": {{}}}}))
                         dead.bind(str(offline))
                         offline.chmod(0o600)
                 response = self.run_cli("review", "--cwd", str(self.work), "--prompt", "plan", "--fallback-brief", "--background", code=1, AGY_DELEGATE_SOCKET=str(offline))
-                self.assertIn("确认 Antigravity Desktop", response["error"])
-                self.assertIn("只读评审", response["fallback_brief"])
+                self.assertIn("Make sure Antigravity Desktop is running", response["error"])
+                self.assertIn("Read-only review", response["fallback_brief"])
         finally:
             offline.unlink(missing_ok=True)
 

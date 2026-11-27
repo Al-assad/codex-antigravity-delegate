@@ -39,7 +39,7 @@ def private_dir(path):
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-        raise Rejected(f"目录必须属于当前用户且权限为 0700：{path}")
+        raise Rejected(f"The directory must be owned by the current user and have mode 0700: {path}")
 
 
 def project_for(cwd, projects, default):
@@ -47,7 +47,7 @@ def project_for(cwd, projects, default):
         return default, "default"
     target = Path(cwd).resolve(strict=True)
     if not target.is_dir():
-        raise Rejected("cwd 必须是存在的目录。")
+        raise Rejected("cwd must be an existing directory.")
     matches = []
     for path in Path(projects).glob("*.json"):
         try:
@@ -77,7 +77,7 @@ def project_for(cwd, projects, default):
     depth = max(item[0] for item in matches)
     nearest = {project_id for size, project_id in matches if size == depth}
     if len(nearest) != 1:
-        raise Rejected("多个 Antigravity 项目匹配 cwd；请先在桌面整理重复的项目配置。")
+        raise Rejected("Multiple Antigravity projects match cwd. Resolve the duplicate project entries in Desktop first.")
     return nearest.pop(), "matched"
 
 
@@ -86,7 +86,7 @@ def field(request, key, limit, optional=False):
     if value is None and optional:
         return None
     if not isinstance(value, str) or not value.strip() or "\0" in value or len(value.encode()) > limit:
-        raise Rejected(f"{key} 必须是非空文本，且不超过 {limit} 字节。")
+        raise Rejected(f"{key} must be non-empty text of at most {limit} bytes.")
     return value
 
 
@@ -94,7 +94,7 @@ def conversation_id(value):
     try:
         return str(uuid.UUID(value))
     except (ValueError, TypeError, AttributeError) as exc:
-        raise Rejected("conversation_id 不是 UUID。") from exc
+        raise Rejected("conversation_id must be a UUID.") from exc
 
 
 class Backend:
@@ -111,10 +111,10 @@ class Backend:
 
     def rpc(self, route, body, *, mutating=False):
         if not self.address or not self.csrf:
-            raise Rejected("未检测到桌面 Sidecar 注入的语言服务地址或凭据。")
+            raise Rejected("The Desktop Sidecar environment is missing the language server address or credentials.")
         address = urlsplit("http://" + self.address)
         if address.hostname not in ("127.0.0.1", "localhost", "::1") or not address.port or address.path:
-            raise Rejected("语言服务必须是本机回环地址。")
+            raise Rejected("The language server must use a local loopback address.")
         client = http.client.HTTPConnection(address.hostname, address.port, timeout=BACKEND_TIMEOUT)
         try:
             client.request("POST", route, json.dumps(body), {
@@ -124,7 +124,7 @@ class Backend:
             response = client.getresponse()
             raw = response.read(4 * 1024 * 1024 + 1)
             if response.status != 200:
-                error = f"桌面 API {route.rsplit('/', 1)[-1]} 返回 HTTP {response.status}。"
+                error = f"Desktop API {route.rsplit('/', 1)[-1]} returned HTTP {response.status}."
                 if not mutating or response.status in (400, 401, 403, 404, 422):
                     raise Rejected(error)
                 raise Uncertain(error)
@@ -134,7 +134,7 @@ class Backend:
             return data
         except (OSError, ValueError, http.client.HTTPException) as exc:
             error = Uncertain if mutating else Rejected
-            raise error(f"桌面 API {route.rsplit('/', 1)[-1]} 未返回有效响应。") from exc
+            raise error(f"Desktop API {route.rsplit('/', 1)[-1]} did not return a valid response.") from exc
         finally:
             client.close()
 
@@ -143,7 +143,7 @@ class Backend:
         conv = data.get("conversation", data)
         state = conv.get("state", {}).get("runState")
         if state not in STATES or conv.get("id") != cid:
-            raise Rejected("桌面未返回该会话的有效 runState。")
+            raise Rejected("Desktop did not return a valid runState for this conversation.")
         return {"conversation_id": cid, "run_state": state, "conversation": conv,
                 "backend": "ConversationService/GetConversation"}
 
@@ -161,13 +161,13 @@ class Backend:
             title = field(request, "title", 512, optional=True)
             cwd = field(request, "cwd", 4096, optional=True)
             if not self.agentapi:
-                raise Rejected("Sidecar 找不到 agentapi；无法续接新会话。")
+                raise Rejected("The Sidecar could not find agentapi and cannot follow up on a new conversation.")
             project, match = project_for(cwd, self.projects, self.project)
             catalog = self.rpc(MODELS, {}).get("response", {})
             available = {item for sort in catalog.get("agentModelSorts", [])
                          for group in sort.get("groups", []) for item in group.get("modelIds", [])}
             if model not in available or model not in catalog.get("models", {}):
-                raise Rejected(f"桌面未列出可用的对话模型 {model}；没有改用其他模型。")
+                raise Rejected(f"Desktop does not list {model} as an available conversation model. No other model was used.")
             payload = {"model": model, "prompt": [{"text": prompt}]}
             if title:
                 payload["title"] = title
@@ -178,7 +178,7 @@ class Backend:
             try:
                 cid = conversation_id(conv.get("id"))
             except (AttributeError, Rejected) as exc:
-                raise Uncertain("桌面未返回有效会话 ID；请在桌面确认是否已创建。") from exc
+                raise Uncertain("Desktop did not return a valid conversation ID. Check in Desktop whether the conversation was created.") from exc
             actual_project = conv.get("metadata", {}).get("projectId")
             return {"conversation_id": cid, "project_id": actual_project, "requested_project_id": project,
                     "project_match": match, "model": model, "backend": "ConversationService/CreateConversation"}
@@ -189,14 +189,14 @@ class Backend:
             prompt = field(request, "prompt", MAX_PROMPT)
             title = field(request, "title", 512, optional=True)
             if not self.agentapi:
-                raise Rejected("Sidecar 找不到 agentapi。")
+                raise Rejected("The Sidecar could not find agentapi.")
             lock = self.locks[uuid.UUID(cid).int % len(self.locks)]
             if not lock.acquire(blocking=False):
-                raise Rejected("该会话正在接收另一条提交，请稍后查看状态。")
+                raise Rejected("Another submission is in progress for this conversation. Check its status again later.")
             try:
                 status = self.status(cid)
                 if status["run_state"] != "RUN_STATE_IDLE":
-                    raise Rejected("会话尚未空闲，请等本轮完成或在桌面点 Stop。")
+                    raise Rejected("The conversation is not idle. Wait for the current turn to finish or click Stop in Desktop.")
                 cmd = self.agentapi + ["send-message"] + ([f"--title={title}"] if title else []) + [cid, prompt]
                 env = os.environ.copy()
                 project = status["conversation"].get("metadata", {}).get("projectId")
@@ -210,11 +210,11 @@ class Backend:
                     if not isinstance(receipt, dict) or receipt.get("error"):
                         raise ValueError("invalid receipt")
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                    raise Uncertain("agentapi 未确认发送；请检查桌面或本地日志，勿直接重发。") from exc
+                    raise Uncertain("agentapi did not confirm delivery. Check Desktop or the local logs before resending.") from exc
                 return {"conversation_id": cid, "project_id": project, "backend": "agentapi/send-message"}
             finally:
                 lock.release()
-        raise Rejected("未知 Sidecar 动作。")
+        raise Rejected("Unknown Sidecar action.")
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -224,20 +224,20 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             raw = self.rfile.readline(MAX_FRAME + 1)
             if not raw or len(raw) > MAX_FRAME or not raw.endswith(b"\n"):
-                raise Rejected("需要一行 JSON 请求，且不超过 256 KiB。")
+                raise Rejected("Expected a single-line JSON request of at most 256 KiB.")
             request = json.loads(raw)
             if not isinstance(request, dict):
-                raise Rejected("请求必须是 JSON 对象。")
+                raise Rejected("The request must be a JSON object.")
             response = {"ok": True, **self.server.backend.dispatch(request)}
         except (json.JSONDecodeError, UnicodeError, TimeoutError):
-            response = {"ok": False, "error": "请求格式无效或读取超时。"}
+            response = {"ok": False, "error": "Invalid request format or read timeout."}
         except Rejected as exc:
             response = {"ok": False, "error": str(exc)}
         except Exception as exc:
             if not isinstance(exc, Uncertain):
                 print(f"Sidecar request failed: {type(exc).__name__}", file=sys.stderr, flush=True)
             response = {"ok": False, "uncertain": True,
-                        "error": str(exc) if isinstance(exc, Uncertain) else "Sidecar 无法确认操作结果。"}
+                        "error": str(exc) if isinstance(exc, Uncertain) else "The Sidecar could not confirm the outcome."}
         try:
             data = json.dumps(response, ensure_ascii=False).encode() + b"\n"
             self.wfile.write(data if len(data) <= MAX_FRAME else b'{"ok":false,"uncertain":true,"error":"Response too large"}\n')
@@ -260,7 +260,7 @@ def serve(path):
             pass
         else:
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-                raise Rejected(f"拒绝替换非本用户的 socket 或普通文件：{path}")
+                raise Rejected(f"Refusing to replace a path that is not a socket owned by the current user: {path}")
             with socket.socket(socket.AF_UNIX) as probe:
                 probe.settimeout(0.5)
                 try:
@@ -268,7 +268,7 @@ def serve(path):
                 except ConnectionRefusedError:
                     path.unlink()
                 else:
-                    raise Rejected(f"已有 Sidecar 正在监听：{path}")
+                    raise Rejected(f"A Sidecar is already listening at {path}")
         old_mask = os.umask(0o177)
         try:
             server = Server(str(path), Handler)

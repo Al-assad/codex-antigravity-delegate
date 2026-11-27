@@ -27,7 +27,8 @@ MODELS = {"neon": "gemini-4-neon-high", "neon-xhigh": "gemini-4-neon-xhigh",
 MAX_FRAME = 256 * 1024
 MAX_PROMPT = 60 * 1024
 CONTEXT_BYTES = 16 * 1024
-OFFLINE = "Sidecar 未连接。请确认 Antigravity Desktop 正在运行且 Codex AGY Delegate 已启用；新配置如未热加载，请手动重开桌面。"
+OFFLINE = ("Cannot connect to the Sidecar. Make sure Antigravity Desktop is running and Codex AGY Delegate is enabled. "
+           "If Desktop did not pick up the new configuration, restart it manually.")
 DEFAULT_TIMEOUT = 300
 EMPTY = {"line": 0, "sha256": hashlib.sha256().hexdigest()}
 
@@ -52,7 +53,7 @@ def uid(value):
     try:
         return str(uuid.UUID(value))
     except (ValueError, TypeError, AttributeError) as exc:
-        raise Error("任务、会话和 Codex session ID 必须是 UUID。") from exc
+        raise Error("Task, conversation, and Codex session IDs must be UUIDs.") from exc
 
 
 def stamp():
@@ -71,14 +72,14 @@ def socket_path():
 def verify_dir(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-        raise Error(f"目录必须属于当前用户且权限为 0700：{path}")
+        raise Error(f"The directory must be owned by the current user and have mode 0700: {path}")
 
 
 def rpc(action, *, timeout=30, **fields):
     path = socket_path()
     frame = json.dumps({"action": action, **fields}, ensure_ascii=False).encode() + b"\n"
     if len(frame) > MAX_FRAME:
-        raise Error("Sidecar 请求过大。")
+        raise Error("Sidecar request too large.")
     mutating = action in ("new", "send")
     with socket.socket(socket.AF_UNIX) as client:
         client.settimeout(timeout)
@@ -86,12 +87,12 @@ def rpc(action, *, timeout=30, **fields):
             verify_dir(path.parent)
             info = path.lstat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-                raise Error(f"拒绝连接非本用户的 0600 socket：{path}")
+                raise Error(f"Refusing to connect: expected a socket owned by the current user with mode 0600: {path}")
             client.connect(str(path))
         except OSError as exc:
             if exc.errno in (errno.ENOENT, errno.ECONNREFUSED):
                 raise Offline(f"{OFFLINE} socket: {path}") from exc
-            raise Error(f"无法连接 Sidecar：{exc}") from exc
+            raise Error(f"Could not connect to the Sidecar: {exc}") from exc
         try:
             client.sendall(frame)
             with client.makefile("rb") as stream:
@@ -103,10 +104,11 @@ def rpc(action, *, timeout=30, **fields):
                 raise ValueError("invalid reply")
         except (OSError, ValueError) as exc:
             cls = Uncertain if mutating else Error
-            raise cls("Sidecar 响应超时或中断。" + ("请核对是否已提交，勿直接重试。" if mutating else "")) from exc
+            raise cls("The Sidecar response timed out or was interrupted."
+                      + (" Verify whether the request was submitted before retrying." if mutating else "")) from exc
     if not reply.pop("ok"):
         cls = Uncertain if mutating and reply.get("uncertain") else Error
-        raise cls(reply.get("error") or "Sidecar 返回错误。")
+        raise cls(reply.get("error") or "The Sidecar returned an error.")
     return reply
 
 
@@ -120,7 +122,7 @@ def ledger():
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise Error("账本正忙，请等当前提交完成后再试。") from exc
+            raise Error("The ledger is busy. Wait for the current submission to finish before retrying.") from exc
         yield root
 
 
@@ -149,10 +151,10 @@ def lookup(root, args):
         cid = uid(args.conversation_id)
         return next((record for record in records(root) if record.get("conversation_id") == cid), None)
     if not args.task_id:
-        raise Error("请提供 task_id 或 --conversation-id。")
+        raise Error("Provide task_id or --conversation-id.")
     path = root / (uid(args.task_id) + ".json")
     if not path.is_file():
-        raise Error("找不到委派任务；用 list 查看账本。")
+        raise Error("No delegated task found. Use list to inspect the ledger.")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -168,9 +170,9 @@ def log_row(raw, line):
     try:
         row = json.loads(raw)
     except ValueError as exc:
-        raise Error(f"JSONL 日志第 {line} 行格式无效。") from exc
+        raise Error(f"Invalid JSON on log line {line}.") from exc
     if not isinstance(row, dict):
-        raise Error(f"JSONL 日志第 {line} 行不是对象。")
+        raise Error(f"JSONL log line {line} is not an object.")
     return row
 
 
@@ -216,11 +218,13 @@ def transcript_turn(path, baseline, marker):
                     if isinstance(row.get("model"), str):
                         models.add(row["model"])
     if line < baseline["line"] or prefix.hexdigest() != baseline["sha256"]:
-        raise Error("Antigravity 日志基线已变化或被截断，无法安全归属本轮结果。")
+        raise Error("The Antigravity log baseline changed or was truncated. Cannot safely attribute replies to this turn.")
     if users > 1:
-        warnings.append("基线后发现多条用户消息，疑似人工插话；只提取委派标记之后、下一条用户消息之前的回复，请在桌面核对。")
+        warnings.append("Multiple user messages appeared after the baseline, possibly from manual input. "
+                        "Only replies between the delegation marker and the next user message are included. Verify in Desktop.")
     elif users and not matched:
-        warnings.append("日志有新用户消息，但尚未找到本轮委派标记；不要把其他回复当作任务结果。")
+        warnings.append("The log contains new user messages, but this turn's delegation marker has not appeared. "
+                        "Do not treat other replies as this task's result.")
     return {"reply": "\n\n".join(response), "observed_models": sorted(models), "new_user_messages": users,
             "new_replies": replies, "matched_messages": matched, "transcript_line": line, "warnings": warnings}
 
@@ -230,10 +234,10 @@ def codex_path(session):
     for folder in ("sessions", "archived_sessions"):
         paths = list((home / folder).rglob(f"rollout-*-{uid(session)}.jsonl"))
         if len(paths) > 1:
-            raise Error("找到多个同 ID 的 Codex rollout，不能安全选择。")
+            raise Error("Multiple Codex rollouts match this ID. Cannot safely select one.")
         if paths:
             return paths[0]
-    raise Error(f"找不到 Codex session {session} 的 rollout。")
+    raise Error(f"No rollout found for Codex session {session}.")
 
 
 def codex_message(row):
@@ -264,7 +268,7 @@ def bounded(text, byte_limit):
     raw = text.encode()
     if len(raw) <= byte_limit:
         return text
-    suffix = "\n[已截断]"
+    suffix = "\n[Truncated]"
     return raw[:byte_limit - len(suffix.encode())].decode("utf-8", errors="ignore") + suffix
 
 
@@ -296,9 +300,9 @@ def codex_context(path, checkpoint=None):
         digest.update(raw)
         line = number
         if checkpoint and number == start and digest.hexdigest() != checkpoint["sha256"]:
-            raise Error("Codex 日志已同步前缀发生变化；核对后用 --reset-codex-offset。")
+            raise Error("The previously synced Codex log prefix has changed. Verify the log before using --reset-codex-offset.")
     if line < start:
-        raise Error("Codex 日志比已同步偏移更短；核对后用 --reset-codex-offset。")
+        raise Error("The Codex log ends before the saved sync offset. Verify the log before using --reset-codex-offset.")
     return "\n\n".join(text for _, text in messages), {"line": line, "sha256": digest.hexdigest()}
 
 
@@ -308,11 +312,11 @@ def git(cwd, *args, require=False):
                              timeout=8, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     except (OSError, subprocess.SubprocessError) as exc:
         if require:
-            raise Error("无法执行 git。") from exc
+            raise Error("Could not run Git.") from exc
         return None
     if run.returncode:
         if require:
-            raise Error("git 查询失败：" + bounded(run.stderr.decode(errors="replace").strip(), 1000))
+            raise Error("Git query failed: " + bounded(run.stderr.decode(errors="replace").strip(), 1000))
         return None
     return bounded(run.stdout.decode(errors="replace").strip(), 5000)
 
@@ -332,11 +336,11 @@ def git_scope(args, cwd):
         return git(cwd, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}", require=True)
     if args.base:
         base = commit(args.base)
-        return f"比较 {args.base}（{base}）与 HEAD（从合并基点起）", ("diff", "--stat", f"{base}...HEAD", "--")
+        return f"Compare HEAD with {args.base} ({base}), starting at their merge base", ("diff", "--stat", f"{base}...HEAD", "--")
     if args.commit:
         sha = commit(args.commit)
-        return f"只评审提交 {sha}", ("show", "--format=", "--stat", sha, "--")
-    return "未提交改动（含暂存、未暂存与 git status 可见的未跟踪文件）", ("diff", "--stat", "HEAD", "--") if git(cwd, "rev-parse", "--verify", "HEAD") else ("diff", "--stat", "--cached")
+        return f"Review only commit {sha}", ("show", "--format=", "--stat", sha, "--")
+    return "Uncommitted changes (staged and unstaged changes, plus untracked files shown by git status)", ("diff", "--stat", "HEAD", "--") if git(cwd, "rev-parse", "--verify", "HEAD") else ("diff", "--stat", "--cached")
 
 
 def prompt_from(args, required):
@@ -350,9 +354,9 @@ def prompt_from(args, required):
     else:
         prompt = ""
     if len(prompt.encode()) > MAX_PROMPT:
-        raise Error("输入 prompt 超过 60 KiB。")
+        raise Error("The prompt exceeds 60 KiB.")
     if required and not prompt.strip():
-        raise Error("请通过 --prompt、--prompt-file 或 stdin 提供任务内容。")
+        raise Error("Provide a task prompt via --prompt, --prompt-file, or stdin.")
     return prompt.strip()
 
 
@@ -361,33 +365,36 @@ def make_brief(args, cwd, prompt):
     for name in args.file:
         path = (cwd / name).resolve()
         if not path.is_file() or not path.is_relative_to(cwd):
-            raise Error(f"目标必须是 cwd 中已有的文件：{name}")
+            raise Error(f"The target must be an existing file within cwd: {name}")
         if str(path) not in files:
             files.append(str(path))
-    lines = [f"工作目录（绝对路径）：{cwd}"]
+    lines = [f"Working directory (absolute path): {cwd}"]
     if files:
-        lines.append("目标文件：\n" + "\n".join(f"- {path}" for path in files))
+        lines.append("Target files:\n" + "\n".join(f"- {path}" for path in files))
     if args.command == "review":
-        lines.append("只读评审，不得修改任何文件；按严重性列问题，附文件和行号、影响及建议；没有发现也明确说明。")
+        lines.append("Read-only review: do not modify any files. List findings by severity, with file paths, "
+                     "line numbers, impact, and recommendations. If there are no findings, say so.")
         if args.uncommitted or args.base or args.commit or not files:
             scope, stat_args = git_scope(args, cwd)
-            lines.append(f"评审范围：{scope}")
+            lines.append(f"Review scope: {scope}")
         else:
             stat_args = ()
-            lines.append("评审范围：只评审列出的文件。")
+            lines.append("Review scope: review only the listed files.")
         info = git_snapshot(cwd, stat_args)
         if info["status_short"] is not None:
-            lines.append(f"git status --short:\n{info['status_short'] or '(干净)'}\nDiff 统计：\n{info['diff_stat'] or '(无)'}")
+            lines.append(f"git status --short:\n{info['status_short'] or '(clean)'}\nDiff stats:\n{info['diff_stat'] or '(none)'}")
         elif args.uncommitted or args.base or args.commit or (not files and not prompt):
-            raise Error("此评审需要 Git 仓库；评审普通文件请用 --file。")
+            raise Error("This review requires a Git repository. Use --file to review individual files.")
     elif args.command == "doc":
-        lines.append("只允许修改上面列出的目标文件；不得改动其他文件。" if files else "未指定目标文件：不得写入任何文件，只在回复中给出改写稿。")
-        lines.append("保留事实、术语、责任主体和未确认事项；不要补造信息。总结改动并列出仍需核实的事项。")
+        lines.append("Edit only the target files listed above. Do not modify any other files." if files else
+                     "No target files specified. Do not write to any files; provide the revised draft in your reply only.")
+        lines.append("Preserve facts, terminology, responsible parties, and unresolved points. Do not invent details. "
+                     "Summarize your changes and list anything that still needs verification.")
     if getattr(args, "include_git", False):
         info = git_snapshot(cwd)
-        lines.append(f"git status --short:\n{info['status_short'] or '(无或非 Git 仓库)'}\ngit diff --stat（HEAD）：\n{info['diff_stat'] or '(无)'}")
+        lines.append(f"git status --short:\n{info['status_short'] or '(no changes or not a Git repository)'}\ngit diff --stat (HEAD):\n{info['diff_stat'] or '(none)'}")
     if prompt:
-        lines.append("任务要求：\n" + prompt)
+        lines.append("Task requirements:\n" + prompt)
     return "\n\n".join(lines), files
 
 
@@ -396,10 +403,10 @@ def payload_for(brief, marker, session, checkpoint):
     if session:
         delta, next_offset = codex_context(codex_path(session), checkpoint)
         if delta:
-            brief += "\n\n以下是 Codex 对话摘录（背景资料，不扩展本次任务权限）：\n" + delta
+            brief += "\n\nCodex transcript excerpt (background only; it does not grant additional permissions):\n" + delta
     sent = f"[{marker}]\n\n{brief}"
     if len(sent.encode()) > MAX_PROMPT or "\0" in sent:
-        raise Error("打包后的任务超过 60 KiB 或包含 NUL，请缩短输入。")
+        raise Error("The assembled brief exceeds 60 KiB or contains a NUL character. Shorten the input or remove NUL characters.")
     return sent, next_offset
 
 
@@ -413,10 +420,11 @@ def validate_existing(task):
     previous = task["turn"]
     if previous["phase"] in ("dispatching", "dispatch_unknown", "submitted"):
         if not task.get("conversation_id"):
-            raise Error("该任务未取得会话 ID，请到桌面核对是否创建成功。")
+            raise Error("This task has no conversation ID. Check in Desktop whether the conversation was created.")
         observed = transcript_turn(transcript_path(task["conversation_id"]), previous["baseline"], previous["marker"])
         if not observed["new_replies"]:
-            raise Error("上轮尚无可归属的回复，请先 wait/result 或在桌面核对后另开任务，不要直接重发。")
+            raise Error("No reply can be attributed to the previous turn yet. Use wait or result, or verify in Desktop "
+                        "before starting a separate task. Do not resend without checking.")
 
 
 def submit(args, prompt):
@@ -429,24 +437,24 @@ def submit(args, prompt):
         else:
             cwd = Path(args.cwd if not follow else os.getcwd()).expanduser().resolve(strict=True)
             if not cwd.is_dir():
-                raise Error("cwd 必须是存在的目录。")
+                raise Error("cwd must be an existing directory.")
             model = MODELS.get(args.model, args.model) if not follow else None
             task = {"task_id": str(uuid.uuid4()), "title": args.title, "cwd": str(cwd), "model": model}
             if follow and args.conversation_id:
                 task["conversation_id"] = uid(args.conversation_id)
         cid = task.get("conversation_id")
         if follow and not cid:
-            raise Error("无法在没有会话 ID 的任务上追问。")
+            raise Error("Cannot follow up on a task without a conversation ID.")
         if follow:
             brief = prompt
             if task.get("scope"):
-                brief = "继续遵守原任务范围：\n" + task["scope"] + "\n\n本轮要求：\n" + brief
+                brief = "Keep to the original task scope:\n" + task["scope"] + "\n\nRequirements for this turn:\n" + brief
         else:
             brief, files = make_brief(args, Path(task["cwd"]), prompt)
             if args.command == "review":
-                task["scope"] = "只读评审，不得修改任何文件。"
+                task["scope"] = "Read-only review: do not modify any files."
             elif args.command == "doc":
-                task["scope"] = "仅可编辑：" + "；".join(files) if files else "只给出改写稿，不写入任何文件。"
+                task["scope"] = "Edit only: " + "; ".join(files) if files else "Provide the revised draft in your reply only. Do not write to any files."
         session = uid(args.codex_session) if args.codex_session else task.get("codex_session")
         checkpoint = task.get("codex_offset") if task.get("codex_session") == session and not getattr(args, "reset_codex_offset", False) else None
         marker = "AGY-DELEGATE:" + uuid.uuid4().hex
@@ -462,7 +470,7 @@ def submit(args, prompt):
                 try:
                     receipt["conversation_id"] = uid(receipt.get("conversation_id"))
                 except Error as exc:
-                    raise Uncertain("Sidecar 未返回有效会话 ID；请到桌面核对是否已经创建。") from exc
+                    raise Uncertain("The Sidecar did not return a valid conversation ID. Check in Desktop whether the conversation was created.") from exc
         except Offline as exc:
             if args.fallback_brief:
                 exc.brief = bounded(brief, 6000)
@@ -493,7 +501,7 @@ def observe(task, *, live, rpc_timeout=14):
     base = label(task)
     cid = task.get("conversation_id")
     if not cid:
-        raise Error(f"任务没有会话 ID（{base['phase']}）；请到桌面核对。")
+        raise Error(f"The task has no conversation ID (phase: {base['phase']}). Verify in Desktop.")
     if live:
         status = rpc("status", conversation_id=cid, timeout=rpc_timeout)
         status["status_backend"] = status.pop("backend", None)
@@ -504,9 +512,9 @@ def observe(task, *, live, rpc_timeout=14):
     base.update(transcript_path=str(path), baseline_line=turn["baseline"]["line"])
     mismatched = set(base["observed_models"]) - {task.get("model")}
     if mismatched and task.get("model"):
-        base["warnings"].append("桌面日志记录的模型与请求不一致；请在桌面核对实际模型。")
+        base["warnings"].append("The model in the Desktop log differs from the requested model. Verify the actual model in Desktop.")
     if task.get("project_id") != task.get("requested_project_id") and task.get("requested_project_id"):
-        base["warnings"].append("桌面返回的项目与请求不一致；请核对实际项目。")
+        base["warnings"].append("Desktop returned a different project than requested. Verify which project was used.")
     return base
 
 
@@ -536,7 +544,7 @@ def wait(task, seconds):
         if complete(task, info):
             return info
         time.sleep(min(1.0, max(0, deadline - time.monotonic())))
-    raise WaitTimeout(f"等待超时，任务未取消；可继续用 status/wait 查询。task_id: {task['task_id']}")
+    raise WaitTimeout(f"Wait timed out. The task was not canceled. Use status or wait to check again. task_id: {task['task_id']}")
 
 
 def options():
@@ -548,7 +556,7 @@ def options():
         mode = modes.add_parser(name)
         mode.add_argument("--json", "--json-output", action="store_true", dest="json_output", **no_default)
         if name in ("review", "doc", "start", "followup", "wait"):
-            mode.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="等待本轮回复的秒数")
+            mode.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Seconds to wait for a reply to the current turn")
         if name in ("followup", "status", "wait", "result"):
             target = mode.add_mutually_exclusive_group(required=True)
             target.add_argument("task_id", nargs="?")
@@ -585,18 +593,18 @@ def emit(value, as_json):
     elif "error" in value:
         print(value["error"], file=sys.stderr)
         for warning in value.get("warnings", []):
-            print(f"注意：{warning}", file=sys.stderr)
+            print(f"Warning: {warning}", file=sys.stderr)
         if "fallback_brief" in value:
             print(value["fallback_brief"])
     elif "tasks" in value:
         for row in value["tasks"]:
-            print(f"{row['task_id']}  {row['phase']}  已记录第 {row['turn']} 轮  {row.get('title') or row['cwd']}")
+            print(f"{row['task_id']}  {row['phase']}  Recorded turn {row['turn']}  {row.get('title') or row['cwd']}")
     else:
         reply = value.get("reply")
         details = {key: item for key, item in value.items() if key not in ("reply", "conversation", "warnings") and item is not None}
         print(json.dumps(details, ensure_ascii=False, indent=2))
         for warning in value.get("warnings", []):
-            print(f"注意：{warning}", file=sys.stderr)
+            print(f"Warning: {warning}", file=sys.stderr)
         if reply:
             print("\n" + reply)
 
@@ -605,20 +613,20 @@ def main():
     args = options().parse_args()
     try:
         if hasattr(args, "timeout") and (not math.isfinite(args.timeout) or args.timeout <= 0):
-            raise Error("--timeout 必须是大于零的有限秒数。")
+            raise Error("--timeout must be a finite, positive number of seconds.")
         if args.command == "health":
             value = rpc("health")
         elif args.command in ("review", "doc", "start", "followup"):
             task = submit(args, prompt_from(args, required=args.command != "review"))
             value = label(task)
             if not args.background:
-                print(f"已提交，等待回复。task_id: {task['task_id']}", file=sys.stderr, flush=True)
+                print(f"Submitted; waiting for a reply. task_id: {task['task_id']}", file=sys.stderr, flush=True)
                 value = wait(task, args.timeout)
         else:
             with ledger() as root:
                 if args.command == "list":
                     if args.limit < 1:
-                        raise Error("--limit 必须大于零。")
+                        raise Error("--limit must be greater than zero.")
                     value = {"tasks": [label(task) for task in sorted(records(root), key=lambda item: item["turn"]["sent_at"], reverse=True)[:args.limit]]}
                 else:
                     task = lookup(root, args)
@@ -627,7 +635,7 @@ def main():
                     if args.command == "status" and args.conversation_id:
                         value = rpc("status", conversation_id=uid(args.conversation_id))
                     else:
-                        raise Error("账本里没有该会话的委派轮次。")
+                        raise Error("The ledger contains no delegated turns for this conversation.")
                 elif args.command == "wait":
                     value = wait(task, args.timeout)
                 elif args.command == "status":
@@ -637,7 +645,7 @@ def main():
                 else:
                     value = observe(task, live=False)
                     if not value["reply"]:
-                        value["error"] = "本轮没有可归属的新回复；请先用 status/wait，必要时在桌面核对。"
+                        value["error"] = "No new reply can be attributed to this turn. Use status or wait, and verify in Desktop if needed."
                     else:
                         value["git"] = git_snapshot(task["cwd"])
         emit(value, args.json_output)
@@ -652,7 +660,7 @@ def main():
         emit(value, args.json_output)
         return 1
     except KeyboardInterrupt:
-        emit({"error": "已中断本地等待；桌面任务不会自动取消。"}, args.json_output)
+        emit({"error": "Local wait interrupted. The Desktop task will not be canceled automatically."}, args.json_output)
         return 130
 
 

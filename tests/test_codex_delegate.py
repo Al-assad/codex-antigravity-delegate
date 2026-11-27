@@ -263,7 +263,7 @@ class CliTests(unittest.TestCase):
         (self.repo / 'tracked.txt').write_text('dirty')
         (self.repo / 'untracked').write_text('not in HEAD')
         denied = self.invoke('start', '--cwd', str(self.repo), '--worktree', '--prompt', 'task', status=(2,))
-        self.assertIn('未提交改动', denied['error'])
+        self.assertIn('uncommitted changes', denied['error'])
         result = self.start('task', '--worktree', '--allow-dirty-worktree')
         isolated = Path(result['worktree'])
         self.assertEqual((isolated / 'tracked.txt').read_text(), 'baseline')
@@ -276,16 +276,16 @@ class CliTests(unittest.TestCase):
 
     def test_review_scope_custom_prompt_and_sandbox_adapter(self):
         result = self.invoke('review', '--cwd', str(self.repo), '--base', 'HEAD', '--model', 'gpt-6-sol',
-                             '--prompt', '重点检查边界条件')
+                             '--prompt', 'Focus on edge cases — especially empty inputs.')
         args = json.loads(self.seen(result, 'argv.seen'))
         self.assertNotIn('review', args)
         self.assertEqual(args[args.index('-s') + 1], 'read-only')
-        self.assertIn('重点检查边界条件', self.seen(result))
+        self.assertIn('Focus on edge cases — especially empty inputs.', self.seen(result))
         self.assertIn(self.git('rev-parse', 'HEAD'), self.seen(result))
         commit = self.invoke('review', '--cwd', str(self.repo), '--commit', 'HEAD')
-        self.assertIn('只审查提交', self.seen(commit))
+        self.assertIn('Review only the changes introduced by commit', self.seen(commit))
         rejected = self.invoke('review', '--cwd', str(self.repo), '--uncommitted', '--worktree', status=(2,))
-        self.assertIn('共享工作区', rejected['error'])
+        self.assertIn('shared working tree', rejected['error'])
 
     def test_followup_advances_agy_only_when_successful(self):
         session, path = self.create_agy()
@@ -369,7 +369,7 @@ class CliTests(unittest.TestCase):
         self.assertTrue(cancelled['sent_sigkill'])
         self.assertFalse(cancelled['pid_alive'])
         self.assertIn('written-by-stub', cancelled['git']['status_short'])
-        self.assertIn('不会自动回滚', cancelled['notice'])
+        self.assertIn('does not automatically revert', cancelled['notice'])
         self.assertEqual(self.invoke('wait', task, status=(130,))['status'], 'cancelled')
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -378,7 +378,7 @@ class CliTests(unittest.TestCase):
             if not state or state.startswith('Z'):
                 break
             time.sleep(0.05)
-        self.assertTrue(not state or state.startswith('Z'), f'子进程仍在运行：{state}')
+        self.assertTrue(not state or state.startswith('Z'), f'Child process is still running: {state}')
 
     def test_background_wait_success_and_persistent_result(self):
         start = self.start('task', '--background')
