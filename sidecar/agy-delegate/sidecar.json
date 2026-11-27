@@ -1,0 +1,7 @@
+{
+  "display_name": "Codex AGY Delegate",
+  "description": "Local Unix-socket bridge for interactive Codex delegation.",
+  "command": "python3",
+  "args": ["sidecar.py"],
+  "restart_policy": "on-failure"
+}
