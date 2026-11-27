@@ -307,7 +307,7 @@ sequenceDiagram
     opt --codex-session supplied
         CLI->>CLI: Read Codex rollout delta from saved line offset + verify SHA-256 prefix
     end
-    CLI->>LOG: Snapshot transcript baseline (follow-ups; new conversations start at line 0)
+    CLI->>LOG: Snapshot transcript baseline (follow-ups only, new sessions start at line 0)
     CLI->>SC: Send JSON request with unique [AGY-DELEGATE:TOKEN] marker
     alt New task
         SC->>LS: GetAvailableModels (reject unlisted models, no fallback)
@@ -322,7 +322,7 @@ sequenceDiagram
         SC->>LS: ConversationService/GetConversation
         CLI->>LOG: Scan rows after baseline for marker in USER_INPUT or SYSTEM_MESSAGE
     end
-    CLI-->>CDX: wait returns reply + warnings; result also attaches git status/diff stat
+    CLI-->>CDX: wait returns reply + warnings (result also attaches git status/diff stat)
 ```
 
 #### Implementation Notes
